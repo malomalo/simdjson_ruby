@@ -11,6 +11,9 @@ VALUE rb_mSimdjson;
 
 VALUE rb_eSimdjsonParseError;
 
+VALUE rb_cSimdjsonBuilder;
+VALUE rb_eSimdjsonBuilderError;
+
 using namespace simdjson;
 
 // Convert tape to Ruby's Object
@@ -65,11 +68,212 @@ static VALUE rb_simdjson_parse(VALUE self, VALUE arg) {
     return Qnil;
 }
 
+// ---------------------------------------------------------------------------
+// Simdjson::Builder — a thin wrapper over simdjson::builder::string_builder.
+//
+// The string_builder is a low-level, structure-agnostic JSON serializer: it
+// simply appends tokens to a growable buffer. The caller is responsible for
+// emitting a well-formed document (commas, colons, matching braces). This
+// mirrors the C++ API rather than hiding it, so callers keep full control and
+// the SIMD-accelerated string escaping.
+// ---------------------------------------------------------------------------
+
+using simd_builder = builder::string_builder;
+
+static void builder_free(void *ptr) { delete static_cast<simd_builder *>(ptr); }
+
+static size_t builder_memsize(const void *ptr) {
+    auto b = static_cast<const simd_builder *>(ptr);
+    return sizeof(simd_builder) + (b ? b->size() : 0);
+}
+
+static const rb_data_type_t builder_data_type = {
+    "Simdjson::Builder",
+    {NULL, builder_free, builder_memsize},
+    NULL,
+    NULL,
+    RUBY_TYPED_FREE_IMMEDIATELY,
+};
+
+static VALUE builder_allocate(VALUE klass) {
+    // The underlying object is created in #initialize (it needs the capacity
+    // argument). Wrapping NULL is safe: builder_free(NULL) is a no-op.
+    return TypedData_Wrap_Struct(klass, &builder_data_type, NULL);
+}
+
+static simd_builder *get_builder(VALUE self) {
+    simd_builder *b;
+    TypedData_Get_Struct(self, simd_builder, &builder_data_type, b);
+    if (b == NULL) {
+        rb_raise(rb_eSimdjsonBuilderError, "uninitialized Simdjson::Builder");
+    }
+    return b;
+}
+
+static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
+    VALUE capacity;
+    rb_scan_args(argc, argv, "01", &capacity);
+    size_t initial = NIL_P(capacity) ? simd_builder::DEFAULT_INITIAL_CAPACITY : NUM2SIZET(capacity);
+    RTYPEDDATA_DATA(self) = new simd_builder(initial);
+    return self;
+}
+
+// Append a Ruby value as a JSON value, dispatching on its type. Strings and
+// symbols are escaped and quoted; the numeric/boolean/nil literals are emitted
+// verbatim. Integers outside the int64 range are serialized via their decimal
+// string so arbitrary-precision values remain valid JSON numbers.
+static void append_value(simd_builder *b, VALUE v) {
+    switch (TYPE(v)) {
+        case T_NIL:
+            b->append_null();
+            break;
+        case T_TRUE:
+            b->append(true);
+            break;
+        case T_FALSE:
+            b->append(false);
+            break;
+        case T_FIXNUM:
+            b->append(static_cast<int64_t>(NUM2LL(v)));
+            break;
+        case T_BIGNUM: {
+            VALUE s = rb_big2str(v, 10);
+            b->append_raw(std::string_view(RSTRING_PTR(s), RSTRING_LEN(s)));
+            break;
+        }
+        case T_FLOAT:
+            b->append(static_cast<double>(RFLOAT_VALUE(v)));
+            break;
+        case T_STRING:
+            b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(v), RSTRING_LEN(v)));
+            break;
+        case T_SYMBOL: {
+            VALUE s = rb_sym2str(v);
+            b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(s), RSTRING_LEN(s)));
+            break;
+        }
+        default:
+            rb_raise(rb_eTypeError, "cannot append %" PRIsVALUE " to Simdjson::Builder", rb_obj_class(v));
+    }
+}
+
+// Escape and quote a string-like value for use as an object key.
+static void append_string_token(simd_builder *b, VALUE v) {
+    if (RB_TYPE_P(v, T_SYMBOL)) {
+        v = rb_sym2str(v);
+    }
+    Check_Type(v, T_STRING);
+    b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(v), RSTRING_LEN(v)));
+}
+
+static VALUE builder_start_object(VALUE self) {
+    get_builder(self)->start_object();
+    return self;
+}
+
+static VALUE builder_end_object(VALUE self) {
+    get_builder(self)->end_object();
+    return self;
+}
+
+static VALUE builder_start_array(VALUE self) {
+    get_builder(self)->start_array();
+    return self;
+}
+
+static VALUE builder_end_array(VALUE self) {
+    get_builder(self)->end_array();
+    return self;
+}
+
+static VALUE builder_append_comma(VALUE self) {
+    get_builder(self)->append_comma();
+    return self;
+}
+
+static VALUE builder_append_colon(VALUE self) {
+    get_builder(self)->append_colon();
+    return self;
+}
+
+static VALUE builder_append(VALUE self, VALUE v) {
+    append_value(get_builder(self), v);
+    return self;
+}
+
+static VALUE builder_append_key(VALUE self, VALUE key) {
+    append_string_token(get_builder(self), key);
+    return self;
+}
+
+// Convenience: emit `"key":value`. The key is escaped and quoted; the value is
+// dispatched exactly like #append.
+static VALUE builder_append_key_value(VALUE self, VALUE key, VALUE value) {
+    simd_builder *b = get_builder(self);
+    append_string_token(b, key);
+    b->append_colon();
+    append_value(b, value);
+    return self;
+}
+
+// Append bytes verbatim, without escaping or quoting. The caller is
+// responsible for producing valid JSON.
+static VALUE builder_append_raw(VALUE self, VALUE str) {
+    Check_Type(str, T_STRING);
+    get_builder(self)->append_raw(std::string_view(RSTRING_PTR(str), RSTRING_LEN(str)));
+    return self;
+}
+
+static VALUE builder_view(VALUE self) {
+    simd_builder *b = get_builder(self);
+    std::string_view result;
+    auto error = b->view().get(result);
+    if (error) {
+        rb_raise(rb_eSimdjsonBuilderError, "builder error: %s", error_message(error));
+    }
+    return rb_utf8_str_new(result.data(), result.size());
+}
+
+static VALUE builder_size(VALUE self) { return SIZET2NUM(get_builder(self)->size()); }
+
+static VALUE builder_clear(VALUE self) {
+    get_builder(self)->clear();
+    return self;
+}
+
+static VALUE builder_validate_unicode(VALUE self) {
+    return get_builder(self)->validate_unicode() ? Qtrue : Qfalse;
+}
+
 extern "C" {
 
 void Init_simdjson(void) {
     rb_mSimdjson = rb_define_module("Simdjson");
     rb_eSimdjsonParseError = rb_define_class_under(rb_mSimdjson, "ParseError", rb_eStandardError);
     rb_define_module_function(rb_mSimdjson, "parse", reinterpret_cast<VALUE (*)(...)>(rb_simdjson_parse), 1);
+
+    rb_eSimdjsonBuilderError = rb_define_class_under(rb_mSimdjson, "BuilderError", rb_eStandardError);
+
+    rb_cSimdjsonBuilder = rb_define_class_under(rb_mSimdjson, "Builder", rb_cObject);
+    rb_define_alloc_func(rb_cSimdjsonBuilder, builder_allocate);
+    rb_define_method(rb_cSimdjsonBuilder, "initialize", reinterpret_cast<VALUE (*)(...)>(builder_initialize), -1);
+    rb_define_method(rb_cSimdjsonBuilder, "start_object", reinterpret_cast<VALUE (*)(...)>(builder_start_object), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "end_object", reinterpret_cast<VALUE (*)(...)>(builder_end_object), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "start_array", reinterpret_cast<VALUE (*)(...)>(builder_start_array), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "end_array", reinterpret_cast<VALUE (*)(...)>(builder_end_array), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "append_comma", reinterpret_cast<VALUE (*)(...)>(builder_append_comma), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "append_colon", reinterpret_cast<VALUE (*)(...)>(builder_append_colon), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "append", reinterpret_cast<VALUE (*)(...)>(builder_append), 1);
+    rb_define_method(rb_cSimdjsonBuilder, "append_key", reinterpret_cast<VALUE (*)(...)>(builder_append_key), 1);
+    rb_define_method(rb_cSimdjsonBuilder, "append_key_value",
+                     reinterpret_cast<VALUE (*)(...)>(builder_append_key_value), 2);
+    rb_define_method(rb_cSimdjsonBuilder, "append_raw", reinterpret_cast<VALUE (*)(...)>(builder_append_raw), 1);
+    rb_define_method(rb_cSimdjsonBuilder, "view", reinterpret_cast<VALUE (*)(...)>(builder_view), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "to_s", reinterpret_cast<VALUE (*)(...)>(builder_view), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "size", reinterpret_cast<VALUE (*)(...)>(builder_size), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "length", reinterpret_cast<VALUE (*)(...)>(builder_size), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "clear", reinterpret_cast<VALUE (*)(...)>(builder_clear), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "validate_unicode",
+                     reinterpret_cast<VALUE (*)(...)>(builder_validate_unicode), 0);
 }
 }
