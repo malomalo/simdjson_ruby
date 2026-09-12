@@ -1,4 +1,5 @@
 
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -141,9 +142,17 @@ static void append_value(simd_builder *b, VALUE v) {
             b->append_raw(std::string_view(RSTRING_PTR(s), RSTRING_LEN(s)));
             break;
         }
-        case T_FLOAT:
-            b->append(static_cast<double>(RFLOAT_VALUE(v)));
+        case T_FLOAT: {
+            double d = RFLOAT_VALUE(v);
+            // JSON has no representation for Infinity or NaN, and simdjson's
+            // to_chars is only defined for finite values (it would emit garbage
+            // for inf/nan). Reject them rather than produce unparseable output.
+            if (!std::isfinite(d)) {
+                rb_raise(rb_eSimdjsonBuilderError, "cannot serialize non-finite Float %" PRIsVALUE " to JSON", v);
+            }
+            b->append(d);
             break;
+        }
         case T_STRING:
             b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(v), RSTRING_LEN(v)));
             break;

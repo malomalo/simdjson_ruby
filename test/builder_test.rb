@@ -112,6 +112,12 @@ class BuilderTest < Minitest::Test
     assert_equal @b.view, @b.to_s
   end
 
+  def test_append_rejects_non_finite_floats
+    [Float::INFINITY, -Float::INFINITY, Float::NAN, 1.0 / 0.0].each do |value|
+      assert_raises(Simdjson::BuilderError) { @b.clear.append(value) }
+    end
+  end
+
   def test_append_rejects_unsupported_type
     assert_raises(TypeError) { @b.append(Object.new) }
   end
