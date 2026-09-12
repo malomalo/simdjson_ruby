@@ -115,7 +115,18 @@ static simd_builder *get_builder(VALUE self) {
 static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
     VALUE capacity;
     rb_scan_args(argc, argv, "01", &capacity);
-    size_t initial = NIL_P(capacity) ? simd_builder::DEFAULT_INITIAL_CAPACITY : NUM2SIZET(capacity);
+    size_t initial = simd_builder::DEFAULT_INITIAL_CAPACITY;
+    if (!NIL_P(capacity)) {
+        if (!RB_INTEGER_TYPE_P(capacity)) {
+            rb_raise(rb_eTypeError, "capacity must be an Integer");
+        }
+        // A negative capacity would wrap to a huge size_t under NUM2SIZET; reject
+        // it up front rather than letting the allocation fail lazily at #view.
+        if (RTEST(rb_funcall(capacity, rb_intern("negative?"), 0))) {
+            rb_raise(rb_eArgError, "capacity must be non-negative");
+        }
+        initial = NUM2SIZET(capacity);
+    }
     RTYPEDDATA_DATA(self) = new simd_builder(initial);
     return self;
 }

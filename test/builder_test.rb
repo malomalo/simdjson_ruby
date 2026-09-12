@@ -124,6 +124,14 @@ class BuilderTest < Minitest::Test
     assert_equal '"a longer string than eight bytes"', b.view
   end
 
+  def test_negative_capacity_raises
+    assert_raises(ArgumentError) { Simdjson::Builder.new(-1) }
+  end
+
+  def test_non_integer_capacity_raises
+    assert_raises(TypeError) { Simdjson::Builder.new('big') }
+  end
+
   def test_to_s_is_view
     @b.append('x')
     assert_equal @b.view, @b.to_s
