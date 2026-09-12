@@ -7,7 +7,6 @@
 // which breaks std::snprintf used inside simdjson.
 #include "simdjson.h"
 #include "ruby.h"
-#include "ruby/encoding.h"
 
 VALUE rb_mSimdjson;
 
@@ -145,24 +144,15 @@ static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
     return self;
 }
 
-// Return a UTF-8 encoded version of a String, so the bytes we append are valid
-// UTF-8 and match the encoding view() labels the buffer with. UTF-8 strings are
-// passed through untouched (their byte-content validity is the caller's concern,
-// checkable via #validate_unicode); other encodings are transcoded, and bytes
-// with no UTF-8 representation (e.g. binary strings) raise EncodingError rather
-// than silently corrupting the output.
-static VALUE to_utf8(VALUE str) {
-    rb_encoding *utf8 = rb_utf8_encoding();
-    if (rb_enc_get(str) == utf8) {
-        return str;
-    }
-    return rb_str_encode(str, rb_enc_from_encoding(utf8), 0, Qnil);
-}
-
 // Append a Ruby value as a JSON value, dispatching on its type. Strings and
 // symbols are escaped and quoted; the numeric/boolean/nil literals are emitted
 // verbatim. Integers outside the int64 range are serialized via their decimal
 // string so arbitrary-precision values remain valid JSON numbers.
+//
+// String bytes are appended as-is (escaped but not transcoded), mirroring the
+// parser, which likewise does not inspect Ruby encodings and relies on
+// simdjson's own UTF-8 handling. Callers wanting a UTF-8 guarantee on the
+// output can check it with #validate_unicode.
 static void append_value(simd_builder *b, VALUE v) {
     switch (TYPE(v)) {
         case T_NIL:
@@ -193,13 +183,11 @@ static void append_value(simd_builder *b, VALUE v) {
             b->append(d);
             break;
         }
-        case T_STRING: {
-            VALUE s = to_utf8(v);
-            b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(s), RSTRING_LEN(s)));
+        case T_STRING:
+            b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(v), RSTRING_LEN(v)));
             break;
-        }
         case T_SYMBOL: {
-            VALUE s = to_utf8(rb_sym2str(v));
+            VALUE s = rb_sym2str(v);
             b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(s), RSTRING_LEN(s)));
             break;
         }
@@ -215,7 +203,6 @@ static void append_string_token(simd_builder *b, VALUE v) {
     } else {
         StringValue(v);  // coerce via #to_str, or raise TypeError
     }
-    v = to_utf8(v);
     b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(v), RSTRING_LEN(v)));
 }
 

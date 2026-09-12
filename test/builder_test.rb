@@ -44,21 +44,11 @@ class BuilderTest < Minitest::Test
     assert @b.validate_unicode
   end
 
-  def test_append_transcodes_non_utf8_string_to_utf8
-    latin1 = 'café'.encode('ISO-8859-1')
-    @b.append(latin1)
-    assert_equal '"café"', @b.view
-    assert_equal Encoding::UTF_8, @b.view.encoding
-    assert @b.validate_unicode
-  end
-
-  def test_append_key_transcodes_non_utf8_string
-    @b.start_object.append_key('café'.encode('ISO-8859-1')).append_colon.append(1).end_object
-    assert_equal({ 'café' => 1 }, Simdjson.parse(@b.view))
-  end
-
-  def test_append_rejects_untranscodable_bytes
-    assert_raises(EncodingError) { @b.append("\xFF".b) }
+  # Like the parser, the builder does not inspect Ruby encodings or transcode;
+  # it appends bytes as-is and leaves UTF-8 verification to #validate_unicode.
+  def test_append_does_not_transcode_and_validate_unicode_flags_it
+    @b.append('café'.encode('ISO-8859-1'))
+    refute @b.validate_unicode
   end
 
   def test_view_is_utf8
