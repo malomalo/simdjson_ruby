@@ -58,16 +58,26 @@ static VALUE make_ruby_object(dom::element element) {
 static VALUE rb_simdjson_parse(VALUE self, VALUE arg) {
     Check_Type(arg, T_STRING);
 
-    dom::parser parser;
-    padded_string str(RSTRING_PTR(arg), RSTRING_LEN(arg));
-    dom::element doc;
-    auto error = parser.parse(str).get(doc);
-    if (error == SUCCESS) {
-        return make_ruby_object(doc);
+    // rb_raise unwinds with longjmp, which does not run C++ destructors, so the
+    // parser and padded_string (both owning heap buffers) must go out of scope
+    // before we raise. Materialize the whole Ruby object graph inside this scope
+    // — doc references data owned by parser/str — then raise afterwards.
+    VALUE result = Qnil;
+    error_code error;
+    {
+        dom::parser parser;
+        padded_string str(RSTRING_PTR(arg), RSTRING_LEN(arg));
+        dom::element doc;
+        error = parser.parse(str).get(doc);
+        if (error == SUCCESS) {
+            result = make_ruby_object(doc);
+        }
     }
-    // TODO better error handling
-    rb_raise(rb_eSimdjsonParseError, "parse error");
-    return Qnil;
+    if (error != SUCCESS) {
+        // TODO better error handling
+        rb_raise(rb_eSimdjsonParseError, "parse error");
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
