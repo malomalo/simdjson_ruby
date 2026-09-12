@@ -212,8 +212,9 @@ static void append_value(simd_builder *b, VALUE v) {
 static void append_string_token(simd_builder *b, VALUE v) {
     if (RB_TYPE_P(v, T_SYMBOL)) {
         v = rb_sym2str(v);
+    } else {
+        StringValue(v);  // coerce via #to_str, or raise TypeError
     }
-    Check_Type(v, T_STRING);
     v = to_utf8(v);
     b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(v), RSTRING_LEN(v)));
 }
@@ -271,7 +272,7 @@ static VALUE builder_append_key_value(VALUE self, VALUE key, VALUE value) {
 // Append bytes verbatim, without escaping or quoting. The caller is
 // responsible for producing valid JSON.
 static VALUE builder_append_raw(VALUE self, VALUE str) {
-    Check_Type(str, T_STRING);
+    StringValue(str);  // coerce via #to_str, or raise TypeError
     get_builder(self)->append_raw(std::string_view(RSTRING_PTR(str), RSTRING_LEN(str)));
     return self;
 }

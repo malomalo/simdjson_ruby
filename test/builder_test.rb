@@ -159,6 +159,20 @@ class BuilderTest < Minitest::Test
     assert_raises(TypeError) { @b.append_raw(123) }
   end
 
+  def test_append_raw_accepts_to_str
+    obj = Object.new
+    def obj.to_str = '[1,2]'
+    @b.append_raw(obj)
+    assert_equal '[1,2]', @b.view
+  end
+
+  def test_append_key_accepts_to_str
+    key = Object.new
+    def key.to_str = 'k'
+    @b.start_object.append_key_value(key, 1).end_object
+    assert_equal '{"k":1}', @b.view
+  end
+
   def test_chaining_returns_self
     assert_same @b, @b.start_array
     assert_same @b, @b.append(1)
