@@ -13,3 +13,6 @@ Style/GlobalVars:
     - $CXXFLAGS
 Metrics/CyclomaticComplexity:
   Max: 10
+Metrics/ClassLength:
+  Exclude:
+    - 'test/**/*'
