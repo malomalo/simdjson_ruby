@@ -127,6 +127,10 @@ static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
         }
         initial = NUM2SIZET(capacity);
     }
+    // Guard against a second #initialize leaking the builder from the first.
+    // On the normal path the wrapped pointer is NULL (see builder_allocate) and
+    // delete NULL is a no-op.
+    delete static_cast<simd_builder *>(RTYPEDDATA_DATA(self));
     RTYPEDDATA_DATA(self) = new simd_builder(initial);
     return self;
 }

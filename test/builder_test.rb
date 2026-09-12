@@ -132,6 +132,14 @@ class BuilderTest < Minitest::Test
     assert_raises(TypeError) { Simdjson::Builder.new('big') }
   end
 
+  def test_reinitialize_resets_and_does_not_double_free
+    @b.append('discarded')
+    @b.send(:initialize, 8)
+    assert_equal 0, @b.size
+    assert_equal '"x"', @b.append('x').view
+    GC.start
+  end
+
   def test_to_s_is_view
     @b.append('x')
     assert_equal @b.view, @b.to_s
