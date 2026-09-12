@@ -300,33 +300,34 @@ static VALUE builder_validate_unicode(VALUE self) {
 
 extern "C" {
 
+// Ruby 3.x's headers provide C++ overloads of rb_define_method et al. that
+// accept correctly-typed function pointers directly, so no ANYARGS cast is
+// needed (or wanted — the cast is technically undefined behavior).
 void Init_simdjson(void) {
     rb_mSimdjson = rb_define_module("Simdjson");
     rb_eSimdjsonParseError = rb_define_class_under(rb_mSimdjson, "ParseError", rb_eStandardError);
-    rb_define_module_function(rb_mSimdjson, "parse", reinterpret_cast<VALUE (*)(...)>(rb_simdjson_parse), 1);
+    rb_define_module_function(rb_mSimdjson, "parse", rb_simdjson_parse, 1);
 
     rb_eSimdjsonBuilderError = rb_define_class_under(rb_mSimdjson, "BuilderError", rb_eStandardError);
 
     rb_cSimdjsonBuilder = rb_define_class_under(rb_mSimdjson, "Builder", rb_cObject);
     rb_define_alloc_func(rb_cSimdjsonBuilder, builder_allocate);
-    rb_define_method(rb_cSimdjsonBuilder, "initialize", reinterpret_cast<VALUE (*)(...)>(builder_initialize), -1);
-    rb_define_method(rb_cSimdjsonBuilder, "start_object", reinterpret_cast<VALUE (*)(...)>(builder_start_object), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "end_object", reinterpret_cast<VALUE (*)(...)>(builder_end_object), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "start_array", reinterpret_cast<VALUE (*)(...)>(builder_start_array), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "end_array", reinterpret_cast<VALUE (*)(...)>(builder_end_array), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "append_comma", reinterpret_cast<VALUE (*)(...)>(builder_append_comma), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "append_colon", reinterpret_cast<VALUE (*)(...)>(builder_append_colon), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "append", reinterpret_cast<VALUE (*)(...)>(builder_append), 1);
-    rb_define_method(rb_cSimdjsonBuilder, "append_key", reinterpret_cast<VALUE (*)(...)>(builder_append_key), 1);
-    rb_define_method(rb_cSimdjsonBuilder, "append_key_value",
-                     reinterpret_cast<VALUE (*)(...)>(builder_append_key_value), 2);
-    rb_define_method(rb_cSimdjsonBuilder, "append_raw", reinterpret_cast<VALUE (*)(...)>(builder_append_raw), 1);
-    rb_define_method(rb_cSimdjsonBuilder, "view", reinterpret_cast<VALUE (*)(...)>(builder_view), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "to_s", reinterpret_cast<VALUE (*)(...)>(builder_view), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "size", reinterpret_cast<VALUE (*)(...)>(builder_size), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "length", reinterpret_cast<VALUE (*)(...)>(builder_size), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "clear", reinterpret_cast<VALUE (*)(...)>(builder_clear), 0);
-    rb_define_method(rb_cSimdjsonBuilder, "validate_unicode",
-                     reinterpret_cast<VALUE (*)(...)>(builder_validate_unicode), 0);
+    rb_define_method(rb_cSimdjsonBuilder, "initialize", builder_initialize, -1);
+    rb_define_method(rb_cSimdjsonBuilder, "start_object", builder_start_object, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "end_object", builder_end_object, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "start_array", builder_start_array, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "end_array", builder_end_array, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "append_comma", builder_append_comma, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "append_colon", builder_append_colon, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "append", builder_append, 1);
+    rb_define_method(rb_cSimdjsonBuilder, "append_key", builder_append_key, 1);
+    rb_define_method(rb_cSimdjsonBuilder, "append_key_value", builder_append_key_value, 2);
+    rb_define_method(rb_cSimdjsonBuilder, "append_raw", builder_append_raw, 1);
+    rb_define_method(rb_cSimdjsonBuilder, "view", builder_view, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "to_s", builder_view, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "size", builder_size, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "length", builder_size, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "clear", builder_clear, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "validate_unicode", builder_validate_unicode, 0);
 }
 }
