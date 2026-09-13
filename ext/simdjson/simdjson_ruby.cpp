@@ -144,16 +144,57 @@ static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
     return self;
 }
 
+// Cap generated nesting at the same depth the parser accepts by default
+// (simdjson::DEFAULT_MAX_DEPTH), which also stops a self-referential structure
+// (e.g. a = []; a << a) from recursing until the C stack overflows.
+static const int MAX_NESTING_DEPTH = static_cast<int>(simdjson::DEFAULT_MAX_DEPTH);
+
+// Forward declaration: Arrays and Hashes append their elements recursively.
+static void append_value(simd_builder *b, VALUE v, int depth);
+
+// Convert a Hash key to its JSON string form. Symbols and Strings are used
+// directly; any other key is stringified with #to_s, matching JSON.generate.
+static void append_hash_key(simd_builder *b, VALUE key) {
+    if (RB_TYPE_P(key, T_SYMBOL)) {
+        key = rb_sym2str(key);
+    } else if (!RB_TYPE_P(key, T_STRING)) {
+        key = rb_obj_as_string(key);
+    }
+    b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(key), RSTRING_LEN(key)));
+}
+
+struct hash_append_ctx {
+    simd_builder *b;
+    int depth;
+    bool first;
+};
+
+// rb_hash_foreach callback: emit `"key":value`, comma-separated. rb_hash_foreach
+// wraps iteration in rb_ensure, so a raise from append_value here is safe.
+static int hash_append_i(VALUE key, VALUE val, VALUE arg) {
+    hash_append_ctx *ctx = reinterpret_cast<hash_append_ctx *>(arg);
+    if (!ctx->first) {
+        ctx->b->append_comma();
+    }
+    ctx->first = false;
+    append_hash_key(ctx->b, key);
+    ctx->b->append_colon();
+    append_value(ctx->b, val, ctx->depth + 1);
+    return ST_CONTINUE;
+}
+
 // Append a Ruby value as a JSON value, dispatching on its type. Strings and
 // symbols are escaped and quoted; the numeric/boolean/nil literals are emitted
 // verbatim. Integers outside the int64 range are serialized via their decimal
-// string so arbitrary-precision values remain valid JSON numbers.
+// string so arbitrary-precision values remain valid JSON numbers. Arrays and
+// Hashes are emitted as JSON arrays/objects, recursing into their elements
+// (Hash keys are stringified, values dispatched like any other value).
 //
 // String bytes are appended as-is (escaped but not transcoded), mirroring the
 // parser, which likewise does not inspect Ruby encodings and relies on
 // simdjson's own UTF-8 handling. Callers wanting a UTF-8 guarantee on the
 // output can check it with #validate_unicode.
-static void append_value(simd_builder *b, VALUE v) {
+static void append_value(simd_builder *b, VALUE v, int depth) {
     switch (TYPE(v)) {
         case T_NIL:
             b->append_null();
@@ -189,6 +230,31 @@ static void append_value(simd_builder *b, VALUE v) {
         case T_SYMBOL: {
             VALUE s = rb_sym2str(v);
             b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(s), RSTRING_LEN(s)));
+            break;
+        }
+        case T_ARRAY: {
+            if (depth >= MAX_NESTING_DEPTH) {
+                rb_raise(rb_eSimdjsonBuilderError, "nesting is too deep");
+            }
+            b->start_array();
+            long n = RARRAY_LEN(v);
+            for (long i = 0; i < n; i++) {
+                if (i > 0) {
+                    b->append_comma();
+                }
+                append_value(b, RARRAY_AREF(v, i), depth + 1);
+            }
+            b->end_array();
+            break;
+        }
+        case T_HASH: {
+            if (depth >= MAX_NESTING_DEPTH) {
+                rb_raise(rb_eSimdjsonBuilderError, "nesting is too deep");
+            }
+            b->start_object();
+            hash_append_ctx ctx = {b, depth, true};
+            rb_hash_foreach(v, hash_append_i, reinterpret_cast<VALUE>(&ctx));
+            b->end_object();
             break;
         }
         default:
@@ -237,7 +303,7 @@ static VALUE builder_append_colon(VALUE self) {
 }
 
 static VALUE builder_append(VALUE self, VALUE v) {
-    append_value(get_builder(self), v);
+    append_value(get_builder(self), v, 0);
     return self;
 }
 
@@ -252,7 +318,7 @@ static VALUE builder_append_key_value(VALUE self, VALUE key, VALUE value) {
     simd_builder *b = get_builder(self);
     append_string_token(b, key);
     b->append_colon();
-    append_value(b, value);
+    append_value(b, value, 0);
     return self;
 }
 

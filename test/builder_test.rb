@@ -135,6 +135,62 @@ class BuilderTest < Minitest::Test
     assert_equal @b.view, @b.to_s
   end
 
+  def test_append_array
+    @b.append([1, 'two', 3.5, true, false, nil])
+    assert_equal '[1,"two",3.5,true,false,null]', @b.view
+    assert_equal [1, 'two', 3.5, true, false, nil], Simdjson.parse(@b.view)
+  end
+
+  def test_append_empty_array
+    assert_equal '[]', @b.append([]).view
+  end
+
+  def test_append_hash
+    @b.append({ 'name' => 'Ada', 'year' => 2017 })
+    assert_equal '{"name":"Ada","year":2017}', @b.view
+  end
+
+  def test_append_empty_hash
+    assert_equal '{}', @b.append({}).view
+  end
+
+  def test_append_hash_symbol_keys
+    assert_equal '{"a":1,"b":2}', @b.append({ a: 1, b: 2 }).view
+  end
+
+  def test_append_hash_stringifies_non_string_keys
+    assert_equal '{"1":2}', @b.append({ 1 => 2 }).view
+  end
+
+  def test_append_nested_structure_round_trips
+    doc = { 'make' => 'Toyota', 'year' => 2017, 'tires' => [30.0, 30.2, 30.5],
+            'meta' => { 'new' => true, 'tags' => %w[a b] } }
+    @b.append(doc)
+    assert_equal doc, Simdjson.parse(@b.view)
+  end
+
+  def test_append_key_value_with_container_value
+    @b.start_object.append_key_value('list', [1, 2, 3]).end_object
+    assert_equal({ 'list' => [1, 2, 3] }, Simdjson.parse(@b.view))
+  end
+
+  def test_append_rejects_excessive_nesting
+    deep = []
+    cursor = deep
+    2000.times do
+      inner = []
+      cursor << inner
+      cursor = inner
+    end
+    assert_raises(Simdjson::BuilderError) { @b.append(deep) }
+  end
+
+  def test_append_rejects_self_referential_structure
+    a = []
+    a << a
+    assert_raises(Simdjson::BuilderError) { @b.append(a) }
+  end
+
   def test_append_rejects_non_finite_floats
     [Float::INFINITY, -Float::INFINITY, Float::NAN, 1.0 / 0.0].each do |value|
       assert_raises(Simdjson::BuilderError) { @b.clear.append(value) }
