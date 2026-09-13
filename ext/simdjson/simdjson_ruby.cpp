@@ -91,39 +91,101 @@ static VALUE rb_simdjson_parse(VALUE self, VALUE arg) {
 
 using simd_builder = builder::string_builder;
 
-static void builder_free(void *ptr) { delete static_cast<simd_builder *>(ptr); }
+static ID id_write;
+
+// A builder plus an optional streaming sink. When `io` is set, the builder is a
+// streaming writer: once its buffer grows past `buffer_size` bytes the content
+// is written to `io` (via #write) and the buffer is reset, so a large document
+// is delivered in bounded chunks instead of being held whole. With no `io` it
+// is the plain buffer-backed builder, read back with #view. `clear()` resets
+// the byte buffer without touching structural state, so flushing mid-document
+// is safe (the builder is structure-agnostic).
+struct builder_state {
+    simd_builder *b;
+    VALUE io;            // the sink, or Qnil for buffer-only
+    size_t buffer_size;  // flush threshold when streaming
+};
+
+static void builder_free(void *ptr) {
+    auto s = static_cast<builder_state *>(ptr);
+    if (s) {
+        delete s->b;
+        delete s;
+    }
+}
 
 static size_t builder_memsize(const void *ptr) {
-    auto b = static_cast<const simd_builder *>(ptr);
-    return sizeof(simd_builder) + (b ? b->size() : 0);
+    auto s = static_cast<const builder_state *>(ptr);
+    return sizeof(builder_state) + (s && s->b ? sizeof(simd_builder) + s->b->size() : 0);
+}
+
+static void builder_mark(void *ptr) {
+    auto s = static_cast<builder_state *>(ptr);
+    if (s && !NIL_P(s->io)) {
+        rb_gc_mark(s->io);
+    }
 }
 
 static const rb_data_type_t builder_data_type = {
     "Simdjson::Builder",
-    {NULL, builder_free, builder_memsize},
+    {builder_mark, builder_free, builder_memsize},
     NULL,
     NULL,
     RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
 static VALUE builder_allocate(VALUE klass) {
-    // The underlying object is created in #initialize (it needs the capacity
-    // argument). Wrapping NULL is safe: builder_free(NULL) is a no-op.
+    // The state is created in #initialize (it needs the arguments). Wrapping
+    // NULL is safe: builder_free(NULL) is a no-op.
     return TypedData_Wrap_Struct(klass, &builder_data_type, NULL);
 }
 
-static simd_builder *get_builder(VALUE self) {
-    simd_builder *b;
-    TypedData_Get_Struct(self, simd_builder, &builder_data_type, b);
-    if (b == NULL) {
+static builder_state *get_state(VALUE self) {
+    builder_state *s;
+    TypedData_Get_Struct(self, builder_state, &builder_data_type, s);
+    if (s == NULL) {
         rb_raise(rb_eSimdjsonBuilderError, "uninitialized Simdjson::Builder");
     }
-    return b;
+    return s;
 }
 
+// Write the buffered bytes to the sink and reset the buffer. A no-op when not
+// streaming or when there is nothing buffered. The bytes are copied into a Ruby
+// String before the buffer is cleared, so an #write that raises loses only the
+// in-flight chunk (the render is unwinding anyway).
+static void builder_do_flush(builder_state *s) {
+    if (NIL_P(s->io)) {
+        return;
+    }
+    std::string_view view;
+    auto error = s->b->view().get(view);
+    if (error) {
+        rb_raise(rb_eSimdjsonBuilderError, "builder error: %s", error_message(error));
+    }
+    if (view.size() == 0) {
+        return;
+    }
+    VALUE chunk = rb_utf8_str_new(view.data(), view.size());
+    s->b->clear();
+    rb_funcall(s->io, id_write, 1, chunk);
+}
+
+// Flush once the buffer has grown past the streaming threshold. A plain C
+// branch on the hot path -- the Ruby #write happens only per buffer_size, not
+// per token.
+static inline void builder_maybe_flush(builder_state *s) {
+    if (!NIL_P(s->io) && s->b->size() >= s->buffer_size) {
+        builder_do_flush(s);
+    }
+}
+
+static const size_t DEFAULT_BUFFER_SIZE = 4096;
+
+// Simdjson::Builder.new(capacity = nil, io: nil, buffer_size: 4096)
 static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
-    VALUE capacity;
-    rb_scan_args(argc, argv, "01", &capacity);
+    VALUE capacity, opts;
+    rb_scan_args(argc, argv, "01:", &capacity, &opts);
+
     size_t initial = simd_builder::DEFAULT_INITIAL_CAPACITY;
     if (!NIL_P(capacity)) {
         if (!RB_INTEGER_TYPE_P(capacity)) {
@@ -136,11 +198,32 @@ static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
         }
         initial = NUM2SIZET(capacity);
     }
-    // Guard against a second #initialize leaking the builder from the first.
-    // On the normal path the wrapped pointer is NULL (see builder_allocate) and
-    // delete NULL is a no-op.
-    delete static_cast<simd_builder *>(RTYPEDDATA_DATA(self));
-    RTYPEDDATA_DATA(self) = new simd_builder(initial);
+
+    VALUE io = Qnil;
+    size_t buffer_size = DEFAULT_BUFFER_SIZE;
+    if (!NIL_P(opts)) {
+        VALUE v_io = rb_hash_aref(opts, ID2SYM(rb_intern("io")));
+        if (!NIL_P(v_io)) {
+            if (!rb_respond_to(v_io, id_write)) {
+                rb_raise(rb_eTypeError, "io must respond to #write");
+            }
+            io = v_io;
+        }
+        VALUE v_bs = rb_hash_aref(opts, ID2SYM(rb_intern("buffer_size")));
+        if (!NIL_P(v_bs)) {
+            if (!RB_INTEGER_TYPE_P(v_bs) ||
+                RTEST(rb_funcall(v_bs, rb_intern("<="), 1, INT2FIX(0)))) {
+                rb_raise(rb_eArgError, "buffer_size must be a positive Integer");
+            }
+            buffer_size = NUM2SIZET(v_bs);
+        }
+    }
+
+    // Guard against a second #initialize leaking the state from the first. On
+    // the normal path the wrapped pointer is NULL (see builder_allocate).
+    builder_free(RTYPEDDATA_DATA(self));
+    auto s = new builder_state{new simd_builder(initial), io, buffer_size};
+    RTYPEDDATA_DATA(self) = s;
     return self;
 }
 
@@ -273,52 +356,69 @@ static void append_string_token(simd_builder *b, VALUE v) {
 }
 
 static VALUE builder_start_object(VALUE self) {
-    get_builder(self)->start_object();
+    builder_state *s = get_state(self);
+    s->b->start_object();
+    builder_maybe_flush(s);
     return self;
 }
 
 static VALUE builder_end_object(VALUE self) {
-    get_builder(self)->end_object();
+    builder_state *s = get_state(self);
+    s->b->end_object();
+    builder_maybe_flush(s);
     return self;
 }
 
 static VALUE builder_start_array(VALUE self) {
-    get_builder(self)->start_array();
+    builder_state *s = get_state(self);
+    s->b->start_array();
+    builder_maybe_flush(s);
     return self;
 }
 
 static VALUE builder_end_array(VALUE self) {
-    get_builder(self)->end_array();
+    builder_state *s = get_state(self);
+    s->b->end_array();
+    builder_maybe_flush(s);
     return self;
 }
 
 static VALUE builder_append_comma(VALUE self) {
-    get_builder(self)->append_comma();
+    builder_state *s = get_state(self);
+    s->b->append_comma();
+    builder_maybe_flush(s);
     return self;
 }
 
 static VALUE builder_append_colon(VALUE self) {
-    get_builder(self)->append_colon();
+    builder_state *s = get_state(self);
+    s->b->append_colon();
+    builder_maybe_flush(s);
     return self;
 }
 
 static VALUE builder_append(VALUE self, VALUE v) {
-    append_value(get_builder(self), v, 0);
+    builder_state *s = get_state(self);
+    append_value(s->b, v, 0);
+    builder_maybe_flush(s);
     return self;
 }
 
 static VALUE builder_append_key(VALUE self, VALUE key) {
-    append_string_token(get_builder(self), key);
+    builder_state *s = get_state(self);
+    append_string_token(s->b, key);
+    builder_maybe_flush(s);
     return self;
 }
 
 // Convenience: emit `"key":value`. The key is escaped and quoted; the value is
 // dispatched exactly like #append.
 static VALUE builder_append_key_value(VALUE self, VALUE key, VALUE value) {
-    simd_builder *b = get_builder(self);
-    append_string_token(b, key);
-    b->append_colon();
-    append_value(b, value, 0);
+    builder_state *s = get_state(self);
+    append_string_token(s->b, key);
+    s->b->append_colon();
+    append_value(s->b, value, 0);
+    builder_maybe_flush(s);
     return self;
 }
 
@@ -326,29 +426,40 @@ static VALUE builder_append_key_value(VALUE self, VALUE key, VALUE value) {
 // responsible for producing valid JSON.
 static VALUE builder_append_raw(VALUE self, VALUE str) {
     StringValue(str);  // coerce via #to_str, or raise TypeError
-    get_builder(self)->append_raw(std::string_view(RSTRING_PTR(str), RSTRING_LEN(str)));
+    builder_state *s = get_state(self);
+    s->b->append_raw(std::string_view(RSTRING_PTR(str), RSTRING_LEN(str)));
+    builder_maybe_flush(s);
     return self;
 }
 
+// Force any buffered bytes out to the streaming io now (a no-op when not
+// streaming). Used at capture boundaries and to finish a document.
+static VALUE builder_flush(VALUE self) {
+    builder_do_flush(get_state(self));
+    return self;
+}
+
+// The bytes buffered but not yet flushed. When streaming this is only the tail
+// since the last flush, not the whole document; a buffer-only builder holds the
+// whole document here.
 static VALUE builder_view(VALUE self) {
-    simd_builder *b = get_builder(self);
     std::string_view result;
-    auto error = b->view().get(result);
+    auto error = get_state(self)->b->view().get(result);
     if (error) {
         rb_raise(rb_eSimdjsonBuilderError, "builder error: %s", error_message(error));
     }
     return rb_utf8_str_new(result.data(), result.size());
 }
 
-static VALUE builder_size(VALUE self) { return SIZET2NUM(get_builder(self)->size()); }
+static VALUE builder_size(VALUE self) { return SIZET2NUM(get_state(self)->b->size()); }
 
 static VALUE builder_clear(VALUE self) {
-    get_builder(self)->clear();
+    get_state(self)->b->clear();
     return self;
 }
 
 static VALUE builder_validate_unicode(VALUE self) {
-    return get_builder(self)->validate_unicode() ? Qtrue : Qfalse;
+    return get_state(self)->b->validate_unicode() ? Qtrue : Qfalse;
 }
 
 extern "C" {
@@ -357,6 +468,7 @@ extern "C" {
 // accept correctly-typed function pointers directly, so no ANYARGS cast is
 // needed (or wanted — the cast is technically undefined behavior).
 void Init_simdjson(void) {
+    id_write = rb_intern("write");
     rb_mSimdjson = rb_define_module("Simdjson");
     rb_eSimdjsonParseError = rb_define_class_under(rb_mSimdjson, "ParseError", rb_eStandardError);
     rb_define_module_function(rb_mSimdjson, "parse", rb_simdjson_parse, 1);
@@ -376,6 +488,7 @@ void Init_simdjson(void) {
     rb_define_method(rb_cSimdjsonBuilder, "append_key", builder_append_key, 1);
     rb_define_method(rb_cSimdjsonBuilder, "append_key_value", builder_append_key_value, 2);
     rb_define_method(rb_cSimdjsonBuilder, "append_raw", builder_append_raw, 1);
+    rb_define_method(rb_cSimdjsonBuilder, "flush", builder_flush, 0);
     rb_define_method(rb_cSimdjsonBuilder, "view", builder_view, 0);
     rb_define_method(rb_cSimdjsonBuilder, "to_s", builder_view, 0);
     rb_define_method(rb_cSimdjsonBuilder, "size", builder_size, 0);

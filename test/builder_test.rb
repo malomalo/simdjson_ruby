@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'test_helper'
+require 'stringio'
 
 class BuilderTest < Minitest::Test
   def setup
@@ -223,5 +224,60 @@ class BuilderTest < Minitest::Test
     assert_same @b, @b.start_array
     assert_same @b, @b.append(1)
     assert_same @b, @b.end_array
+  end
+
+  # --- Streaming (io: / buffer_size: / flush) ---
+
+  def test_streams_to_io_as_the_buffer_fills
+    io = StringIO.new
+    b = Simdjson::Builder.new(io: io, buffer_size: 16)
+    b.start_array
+    10.times { |i| b.append_comma if i > 0; b.append("element-#{i}") }
+    # Past the 16-byte buffer, content has already been handed to the io before
+    # we ask for a flush -- i.e. it streamed rather than buffering the whole array.
+    refute_empty io.string, 'expected bytes to reach the io before #flush'
+    b.end_array
+    b.flush
+    assert_equal((0...10).map { |i| "element-#{i}" }, Simdjson.parse(io.string))
+  end
+
+  def test_flush_writes_the_remaining_bytes
+    io = StringIO.new
+    b = Simdjson::Builder.new(io: io, buffer_size: 1 << 20) # large: nothing auto-flushes
+    b.start_object.append_key_value('a', 1).end_object
+    assert_empty io.string, 'nothing should be written until the buffer fills or #flush'
+    b.flush
+    assert_equal '{"a":1}', io.string
+  end
+
+  def test_view_holds_only_the_unflushed_tail_when_streaming
+    io = StringIO.new
+    b = Simdjson::Builder.new(io: io, buffer_size: 8)
+    b.append_raw('xxxxxxxxxx') # 10 bytes > 8 -> flushed to io, buffer reset
+    assert_equal 'xxxxxxxxxx', io.string
+    assert_equal '', b.view
+  end
+
+  def test_flush_is_a_noop_without_an_io
+    @b.append(1)
+    assert_same @b, @b.flush
+    assert_equal '1', @b.view
+  end
+
+  def test_accepts_capacity_and_io_together
+    io = StringIO.new
+    b = Simdjson::Builder.new(1024, io: io, buffer_size: 4096)
+    b.append(1)
+    b.flush
+    assert_equal '1', io.string
+  end
+
+  def test_io_must_respond_to_write
+    assert_raises(TypeError) { Simdjson::Builder.new(io: Object.new) }
+  end
+
+  def test_buffer_size_must_be_a_positive_integer
+    assert_raises(ArgumentError) { Simdjson::Builder.new(io: StringIO.new, buffer_size: 0) }
+    assert_raises(ArgumentError) { Simdjson::Builder.new(io: StringIO.new, buffer_size: -1) }
   end
 end
