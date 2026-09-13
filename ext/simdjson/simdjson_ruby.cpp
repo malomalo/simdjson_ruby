@@ -97,7 +97,7 @@ static ID id_write;
 // streaming writer: once its buffer grows past `buffer_size` bytes the content
 // is written to `io` (via #write) and the buffer is reset, so a large document
 // is delivered in bounded chunks instead of being held whole. With no `io` it
-// is the plain buffer-backed builder, read back with #view. `clear()` resets
+// is the plain buffer-backed builder, read back with #buffer. `clear()` resets
 // the byte buffer without touching structural state, so flushing mid-document
 // is safe (the builder is structure-agnostic).
 struct builder_state {
@@ -192,7 +192,7 @@ static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
             rb_raise(rb_eTypeError, "capacity must be an Integer");
         }
         // A negative capacity would wrap to a huge size_t under NUM2SIZET; reject
-        // it up front rather than letting the allocation fail lazily at #view.
+        // it up front rather than letting the allocation fail lazily at #buffer.
         if (RTEST(rb_funcall(capacity, rb_intern("negative?"), 0))) {
             rb_raise(rb_eArgError, "capacity must be non-negative");
         }
@@ -439,10 +439,10 @@ static VALUE builder_flush(VALUE self) {
     return self;
 }
 
-// The bytes buffered but not yet flushed. When streaming this is only the tail
-// since the last flush, not the whole document; a buffer-only builder holds the
-// whole document here.
-static VALUE builder_view(VALUE self) {
+// The bytes currently buffered but not yet flushed. When streaming this is only
+// the tail since the last flush, not the whole document; a buffer-only builder
+// holds the whole document here.
+static VALUE builder_buffer(VALUE self) {
     std::string_view result;
     auto error = get_state(self)->b->view().get(result);
     if (error) {
@@ -489,8 +489,8 @@ void Init_simdjson(void) {
     rb_define_method(rb_cSimdjsonBuilder, "append_key_value", builder_append_key_value, 2);
     rb_define_method(rb_cSimdjsonBuilder, "append_raw", builder_append_raw, 1);
     rb_define_method(rb_cSimdjsonBuilder, "flush", builder_flush, 0);
-    rb_define_method(rb_cSimdjsonBuilder, "view", builder_view, 0);
-    rb_define_method(rb_cSimdjsonBuilder, "to_s", builder_view, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "buffer", builder_buffer, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "to_s", builder_buffer, 0);
     rb_define_method(rb_cSimdjsonBuilder, "size", builder_size, 0);
     rb_define_method(rb_cSimdjsonBuilder, "length", builder_size, 0);
     rb_define_method(rb_cSimdjsonBuilder, "clear", builder_clear, 0);

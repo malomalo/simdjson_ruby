@@ -10,38 +10,38 @@ class BuilderTest < Minitest::Test
 
   def test_empty_object
     @b.start_object.end_object
-    assert_equal '{}', @b.view
+    assert_equal '{}', @b.buffer
   end
 
   def test_empty_array
     @b.start_array.end_array
-    assert_equal '[]', @b.view
+    assert_equal '[]', @b.buffer
   end
 
   SCALARS = { 42 => '42', -7 => '-7', true => 'true', false => 'false',
               nil => 'null', 1.5 => '1.5', 'hi' => '"hi"' }.freeze
 
   def test_scalars
-    SCALARS.each { |value, expected| assert_equal expected, @b.clear.append(value).view }
+    SCALARS.each { |value, expected| assert_equal expected, @b.clear.append(value).buffer }
   end
 
   def test_symbol_is_appended_as_string
-    assert_equal '"foo"', @b.append(:foo).view
+    assert_equal '"foo"', @b.append(:foo).buffer
   end
 
   def test_bignum_serialized_as_number
     big = 123_456_789_012_345_678_901_234_567_890
-    assert_equal big.to_s, @b.append(big).view
+    assert_equal big.to_s, @b.append(big).buffer
   end
 
   def test_string_escaping
     @b.append("a \"quote\" and \\ and\n newline")
-    assert_equal %("a \\"quote\\" and \\\\ and\\n newline"), @b.view
+    assert_equal %("a \\"quote\\" and \\\\ and\\n newline"), @b.buffer
   end
 
   def test_unicode_is_preserved
     @b.append('café')
-    assert_equal '"café"', @b.view
+    assert_equal '"café"', @b.buffer
     assert @b.validate_unicode
   end
 
@@ -52,28 +52,28 @@ class BuilderTest < Minitest::Test
     refute @b.validate_unicode
   end
 
-  def test_view_is_utf8
-    assert_equal Encoding::UTF_8, @b.append('x').view.encoding
+  def test_buffer_is_utf8
+    assert_equal Encoding::UTF_8, @b.append('x').buffer.encoding
   end
 
   def test_append_raw_is_not_escaped
     @b.append_raw('[1,2,3]')
-    assert_equal '[1,2,3]', @b.view
+    assert_equal '[1,2,3]', @b.buffer
   end
 
   def test_append_key_and_colon
     @b.start_object.append_key('name').append_colon.append('Ada').end_object
-    assert_equal '{"name":"Ada"}', @b.view
+    assert_equal '{"name":"Ada"}', @b.buffer
   end
 
   def test_append_key_value
     @b.start_object.append_key_value('year', 2017).end_object
-    assert_equal '{"year":2017}', @b.view
+    assert_equal '{"year":2017}', @b.buffer
   end
 
   def test_key_value_escapes_key
     @b.append_key_value('a"b', 1)
-    assert_equal '"a\\"b":1', @b.view
+    assert_equal '"a\\"b":1', @b.buffer
   end
 
   def append_array(values)
@@ -94,7 +94,7 @@ class BuilderTest < Minitest::Test
     @b.end_object
 
     assert_equal({ 'make' => 'Toyota', 'year' => 2017, 'tires' => [30.0, 30.2, 30.5] },
-                 Simdjson.parse(@b.view))
+                 Simdjson.parse(@b.buffer))
   end
 
   def test_size_tracks_written_bytes
@@ -106,13 +106,13 @@ class BuilderTest < Minitest::Test
   def test_clear_resets_and_allows_reuse
     @b.append(1).clear
     assert_equal 0, @b.size
-    assert_equal '2', @b.append(2).view
+    assert_equal '2', @b.append(2).buffer
   end
 
   def test_initial_capacity_argument
     b = Simdjson::Builder.new(8)
     b.append('a longer string than eight bytes')
-    assert_equal '"a longer string than eight bytes"', b.view
+    assert_equal '"a longer string than eight bytes"', b.buffer
   end
 
   def test_negative_capacity_raises
@@ -127,52 +127,52 @@ class BuilderTest < Minitest::Test
     @b.append('discarded')
     @b.send(:initialize, 8)
     assert_equal 0, @b.size
-    assert_equal '"x"', @b.append('x').view
+    assert_equal '"x"', @b.append('x').buffer
     GC.start
   end
 
-  def test_to_s_is_view
+  def test_to_s_is_buffer
     @b.append('x')
-    assert_equal @b.view, @b.to_s
+    assert_equal @b.buffer, @b.to_s
   end
 
   def test_append_array
     @b.append([1, 'two', 3.5, true, false, nil])
-    assert_equal '[1,"two",3.5,true,false,null]', @b.view
-    assert_equal [1, 'two', 3.5, true, false, nil], Simdjson.parse(@b.view)
+    assert_equal '[1,"two",3.5,true,false,null]', @b.buffer
+    assert_equal [1, 'two', 3.5, true, false, nil], Simdjson.parse(@b.buffer)
   end
 
   def test_append_empty_array
-    assert_equal '[]', @b.append([]).view
+    assert_equal '[]', @b.append([]).buffer
   end
 
   def test_append_hash
     @b.append({ 'name' => 'Ada', 'year' => 2017 })
-    assert_equal '{"name":"Ada","year":2017}', @b.view
+    assert_equal '{"name":"Ada","year":2017}', @b.buffer
   end
 
   def test_append_empty_hash
-    assert_equal '{}', @b.append({}).view
+    assert_equal '{}', @b.append({}).buffer
   end
 
   def test_append_hash_symbol_keys
-    assert_equal '{"a":1,"b":2}', @b.append({ a: 1, b: 2 }).view
+    assert_equal '{"a":1,"b":2}', @b.append({ a: 1, b: 2 }).buffer
   end
 
   def test_append_hash_stringifies_non_string_keys
-    assert_equal '{"1":2}', @b.append({ 1 => 2 }).view
+    assert_equal '{"1":2}', @b.append({ 1 => 2 }).buffer
   end
 
   def test_append_nested_structure_round_trips
     doc = { 'make' => 'Toyota', 'year' => 2017, 'tires' => [30.0, 30.2, 30.5],
             'meta' => { 'new' => true, 'tags' => %w[a b] } }
     @b.append(doc)
-    assert_equal doc, Simdjson.parse(@b.view)
+    assert_equal doc, Simdjson.parse(@b.buffer)
   end
 
   def test_append_key_value_with_container_value
     @b.start_object.append_key_value('list', [1, 2, 3]).end_object
-    assert_equal({ 'list' => [1, 2, 3] }, Simdjson.parse(@b.view))
+    assert_equal({ 'list' => [1, 2, 3] }, Simdjson.parse(@b.buffer))
   end
 
   def test_append_rejects_excessive_nesting
@@ -210,14 +210,14 @@ class BuilderTest < Minitest::Test
     obj = Object.new
     def obj.to_str = '[1,2]'
     @b.append_raw(obj)
-    assert_equal '[1,2]', @b.view
+    assert_equal '[1,2]', @b.buffer
   end
 
   def test_append_key_accepts_to_str
     key = Object.new
     def key.to_str = 'k'
     @b.start_object.append_key_value(key, 1).end_object
-    assert_equal '{"k":1}', @b.view
+    assert_equal '{"k":1}', @b.buffer
   end
 
   def test_chaining_returns_self
@@ -250,18 +250,18 @@ class BuilderTest < Minitest::Test
     assert_equal '{"a":1}', io.string
   end
 
-  def test_view_holds_only_the_unflushed_tail_when_streaming
+  def test_buffer_holds_only_the_unflushed_tail_when_streaming
     io = StringIO.new
     b = Simdjson::Builder.new(io: io, buffer_size: 8)
     b.append_raw('xxxxxxxxxx') # 10 bytes > 8 -> flushed to io, buffer reset
     assert_equal 'xxxxxxxxxx', io.string
-    assert_equal '', b.view
+    assert_equal '', b.buffer
   end
 
   def test_flush_is_a_noop_without_an_io
     @b.append(1)
     assert_same @b, @b.flush
-    assert_equal '1', @b.view
+    assert_equal '1', @b.buffer
   end
 
   def test_accepts_capacity_and_io_together
