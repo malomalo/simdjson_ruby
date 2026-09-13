@@ -2,6 +2,7 @@
 #include <cmath>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // simdjson.h must precede ruby.h — Ruby's subst.h redefines snprintf,
 // which breaks std::snprintf used inside simdjson.
@@ -93,17 +94,29 @@ using simd_builder = builder::string_builder;
 
 static ID id_write;
 
-// A builder plus an optional streaming sink. When `io` is set, the builder is a
-// streaming writer: once its buffer grows past `buffer_size` bytes the content
-// is written to `io` (via #write) and the buffer is reset, so a large document
-// is delivered in bounded chunks instead of being held whole. With no `io` it
-// is the plain buffer-backed builder, read back with #buffer. `clear()` resets
-// the byte buffer without touching structural state, so flushing mid-document
-// is safe (the builder is structure-agnostic).
+// One open container on the writer's nesting stack. `has_child` tracks whether a
+// member/element has been emitted yet (so we know when a comma is due), and
+// `need_value` (objects only) marks that a key + colon were written by #push_key
+// and the next value fills that slot rather than starting a new member.
+enum class frame_kind : char { OBJECT, ARRAY };
+struct frame {
+    frame_kind kind;
+    bool has_child;
+    bool need_value;
+};
+
+// A builder plus an optional streaming sink and the writer's nesting stack. When
+// `io` is set, the builder is a streaming writer: once its buffer grows past
+// `buffer_size` bytes the content is written to `io` (via #write) and the buffer
+// is reset, so a large document is delivered in bounded chunks instead of being
+// held whole. With no `io` it is the plain buffer-backed builder, read back with
+// #buffer. The byte buffer's `clear()` does not touch `stack`, so flushing
+// mid-document is safe: the structural state lives here, not in the bytes.
 struct builder_state {
     simd_builder *b;
     VALUE io;            // the sink, or Qnil for buffer-only
     size_t buffer_size;  // flush threshold when streaming
+    std::vector<frame> stack;
 };
 
 static void builder_free(void *ptr) {
@@ -116,7 +129,11 @@ static void builder_free(void *ptr) {
 
 static size_t builder_memsize(const void *ptr) {
     auto s = static_cast<const builder_state *>(ptr);
-    return sizeof(builder_state) + (s && s->b ? sizeof(simd_builder) + s->b->size() : 0);
+    if (s == NULL) {
+        return sizeof(builder_state);
+    }
+    return sizeof(builder_state) + (s->b ? sizeof(simd_builder) + s->b->size() : 0) +
+           s->stack.capacity() * sizeof(frame);
 }
 
 static void builder_mark(void *ptr) {
@@ -355,48 +372,6 @@ static void append_string_token(simd_builder *b, VALUE v) {
     b->escape_and_append_with_quotes(std::string_view(RSTRING_PTR(v), RSTRING_LEN(v)));
 }
 
-static VALUE builder_start_object(VALUE self) {
-    builder_state *s = get_state(self);
-    s->b->start_object();
-    builder_maybe_flush(s);
-    return self;
-}
-
-static VALUE builder_end_object(VALUE self) {
-    builder_state *s = get_state(self);
-    s->b->end_object();
-    builder_maybe_flush(s);
-    return self;
-}
-
-static VALUE builder_start_array(VALUE self) {
-    builder_state *s = get_state(self);
-    s->b->start_array();
-    builder_maybe_flush(s);
-    return self;
-}
-
-static VALUE builder_end_array(VALUE self) {
-    builder_state *s = get_state(self);
-    s->b->end_array();
-    builder_maybe_flush(s);
-    return self;
-}
-
-static VALUE builder_append_comma(VALUE self) {
-    builder_state *s = get_state(self);
-    s->b->append_comma();
-    builder_maybe_flush(s);
-    return self;
-}
-
-static VALUE builder_append_colon(VALUE self) {
-    builder_state *s = get_state(self);
-    s->b->append_colon();
-    builder_maybe_flush(s);
-    return self;
-}
-
 static VALUE builder_append(VALUE self, VALUE v) {
     builder_state *s = get_state(self);
     append_value(s->b, v, 0);
@@ -404,20 +379,138 @@ static VALUE builder_append(VALUE self, VALUE v) {
     return self;
 }
 
-static VALUE builder_append_key(VALUE self, VALUE key) {
+// Emit the separator that must precede the next item in the current container,
+// and record that the container now has a child. In an object that means the
+// comma between members plus the member's `"key":` (a key is required unless one
+// was already written by #push_key, tracked via need_value); in an array, just
+// the comma between elements (a key is not allowed). At the top level (empty
+// stack) there is no separator — the item is a bare document-level value.
+static void writer_before_item(builder_state *s, VALUE key) {
+    if (s->stack.empty()) {
+        return;
+    }
+    frame &top = s->stack.back();
+    if (top.kind == frame_kind::OBJECT) {
+        if (top.need_value) {
+            top.need_value = false;  // fills the slot opened by #push_key
+            return;
+        }
+        if (NIL_P(key)) {
+            rb_raise(rb_eSimdjsonBuilderError, "a key is required for an object member");
+        }
+        if (top.has_child) {
+            s->b->append_comma();
+        }
+        append_string_token(s->b, key);
+        s->b->append_colon();
+        top.has_child = true;
+    } else {
+        if (!NIL_P(key)) {
+            rb_raise(rb_eSimdjsonBuilderError, "a key is not allowed in an array");
+        }
+        if (top.has_child) {
+            s->b->append_comma();
+        }
+        top.has_child = true;
+    }
+}
+
+// #push_value(value, key = nil) — append a value (any type #append accepts,
+// including nested Arrays/Hashes). Inside an object a key is required (unless one
+// was set with #push_key); inside an array a key is forbidden.
+static VALUE builder_push_value(int argc, VALUE *argv, VALUE self) {
+    VALUE value, key;
+    rb_scan_args(argc, argv, "11", &value, &key);
     builder_state *s = get_state(self);
-    append_string_token(s->b, key);
+    writer_before_item(s, key);
+    append_value(s->b, value, 0);
     builder_maybe_flush(s);
     return self;
 }
 
-// Convenience: emit `"key":value`. The key is escaped and quoted; the value is
-// dispatched exactly like #append.
-static VALUE builder_append_key_value(VALUE self, VALUE key, VALUE value) {
+// #push_object(key = nil) — open an object as the next item of the current
+// container. Balance it with #pop.
+static VALUE builder_push_object(int argc, VALUE *argv, VALUE self) {
+    VALUE key;
+    rb_scan_args(argc, argv, "01", &key);
     builder_state *s = get_state(self);
+    writer_before_item(s, key);
+    s->b->start_object();
+    s->stack.push_back(frame{frame_kind::OBJECT, false, false});
+    builder_maybe_flush(s);
+    return self;
+}
+
+// #push_array(key = nil) — open an array as the next item of the current
+// container. Balance it with #pop.
+static VALUE builder_push_array(int argc, VALUE *argv, VALUE self) {
+    VALUE key;
+    rb_scan_args(argc, argv, "01", &key);
+    builder_state *s = get_state(self);
+    writer_before_item(s, key);
+    s->b->start_array();
+    s->stack.push_back(frame{frame_kind::ARRAY, false, false});
+    builder_maybe_flush(s);
+    return self;
+}
+
+// #push_key(key) — emit an object member's key (and its colon) on its own; the
+// next #push_value/#push_object/#push_array supplies the value.
+static VALUE builder_push_key(VALUE self, VALUE key) {
+    builder_state *s = get_state(self);
+    if (s->stack.empty() || s->stack.back().kind != frame_kind::OBJECT) {
+        rb_raise(rb_eSimdjsonBuilderError, "push_key is only valid inside an object");
+    }
+    frame &top = s->stack.back();
+    if (top.need_value) {
+        rb_raise(rb_eSimdjsonBuilderError, "push_key called twice without a value");
+    }
+    if (top.has_child) {
+        s->b->append_comma();
+    }
     append_string_token(s->b, key);
     s->b->append_colon();
-    append_value(s->b, value, 0);
+    top.has_child = true;
+    top.need_value = true;
+    builder_maybe_flush(s);
+    return self;
+}
+
+// #pop — close the current object or array.
+static VALUE builder_pop(VALUE self) {
+    builder_state *s = get_state(self);
+    if (s->stack.empty()) {
+        rb_raise(rb_eSimdjsonBuilderError, "pop with no open object or array");
+    }
+    frame top = s->stack.back();
+    if (top.kind == frame_kind::OBJECT) {
+        if (top.need_value) {
+            rb_raise(rb_eSimdjsonBuilderError, "pop after push_key without a value");
+        }
+        s->b->end_object();
+    } else {
+        s->b->end_array();
+    }
+    s->stack.pop_back();
+    builder_maybe_flush(s);
+    return self;
+}
+
+// #pop_all — close every open container, finishing the document.
+static VALUE builder_pop_all(VALUE self) {
+    builder_state *s = get_state(self);
+    while (!s->stack.empty()) {
+        frame top = s->stack.back();
+        if (top.kind == frame_kind::OBJECT) {
+            if (top.need_value) {
+                rb_raise(rb_eSimdjsonBuilderError, "pop_all after push_key without a value");
+            }
+            s->b->end_object();
+        } else {
+            s->b->end_array();
+        }
+        s->stack.pop_back();
+    }
     builder_maybe_flush(s);
     return self;
 }
@@ -454,7 +547,9 @@ static VALUE builder_buffer(VALUE self) {
 static VALUE builder_size(VALUE self) { return SIZET2NUM(get_state(self)->b->size()); }
 
 static VALUE builder_clear(VALUE self) {
-    get_state(self)->b->clear();
+    builder_state *s = get_state(self);
+    s->b->clear();
+    s->stack.clear();  // discard any open containers; start a fresh document
     return self;
 }
 
@@ -478,16 +573,14 @@ void Init_simdjson(void) {
     rb_cSimdjsonBuilder = rb_define_class_under(rb_mSimdjson, "Builder", rb_cObject);
     rb_define_alloc_func(rb_cSimdjsonBuilder, builder_allocate);
     rb_define_method(rb_cSimdjsonBuilder, "initialize", builder_initialize, -1);
-    rb_define_method(rb_cSimdjsonBuilder, "start_object", builder_start_object, 0);
-    rb_define_method(rb_cSimdjsonBuilder, "end_object", builder_end_object, 0);
-    rb_define_method(rb_cSimdjsonBuilder, "start_array", builder_start_array, 0);
-    rb_define_method(rb_cSimdjsonBuilder, "end_array", builder_end_array, 0);
-    rb_define_method(rb_cSimdjsonBuilder, "append_comma", builder_append_comma, 0);
-    rb_define_method(rb_cSimdjsonBuilder, "append_colon", builder_append_colon, 0);
     rb_define_method(rb_cSimdjsonBuilder, "append", builder_append, 1);
-    rb_define_method(rb_cSimdjsonBuilder, "append_key", builder_append_key, 1);
-    rb_define_method(rb_cSimdjsonBuilder, "append_key_value", builder_append_key_value, 2);
     rb_define_method(rb_cSimdjsonBuilder, "append_raw", builder_append_raw, 1);
+    rb_define_method(rb_cSimdjsonBuilder, "push_object", builder_push_object, -1);
+    rb_define_method(rb_cSimdjsonBuilder, "push_array", builder_push_array, -1);
+    rb_define_method(rb_cSimdjsonBuilder, "push_value", builder_push_value, -1);
+    rb_define_method(rb_cSimdjsonBuilder, "push_key", builder_push_key, 1);
+    rb_define_method(rb_cSimdjsonBuilder, "pop", builder_pop, 0);
+    rb_define_method(rb_cSimdjsonBuilder, "pop_all", builder_pop_all, 0);
     rb_define_method(rb_cSimdjsonBuilder, "flush", builder_flush, 0);
     rb_define_method(rb_cSimdjsonBuilder, "buffer", builder_buffer, 0);
     rb_define_method(rb_cSimdjsonBuilder, "to_s", builder_buffer, 0);
