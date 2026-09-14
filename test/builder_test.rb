@@ -198,6 +198,32 @@ class BuilderTest < Minitest::Test
     assert_same @b, @b.pop
   end
 
+  # --- #push_raw: splice pre-serialized bytes through the writer ---
+
+  def test_push_raw_member_into_object
+    @b.push_object.push_raw('"a":1').push_value(2, 'b').pop
+    assert_equal '{"a":1,"b":2}', @b.buffer
+  end
+
+  def test_push_raw_element_into_array
+    @b.push_array.push_value(1).push_raw('{"x":2}').pop
+    assert_equal '[1,{"x":2}]', @b.buffer
+  end
+
+  def test_push_raw_as_pending_key_value
+    @b.push_object.push_key('a').push_raw('[1,2]').pop
+    assert_equal '{"a":[1,2]}', @b.buffer
+  end
+
+  def test_push_raw_at_root
+    @b.push_raw('[1,2,3]')
+    assert_equal '[1,2,3]', @b.buffer
+  end
+
+  def test_push_raw_requires_string
+    assert_raises(TypeError) { @b.push_raw(123) }
+  end
+
   # --- Writer: misuse is reported, not silently mis-serialized ---
 
   def test_object_member_requires_a_key

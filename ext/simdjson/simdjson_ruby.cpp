@@ -518,6 +518,33 @@ static VALUE builder_append_raw(VALUE self, VALUE str) {
     return self;
 }
 
+// Splice pre-serialized bytes as a member (object) or element (array), through
+// the writer's separators and nesting state -- the raw counterpart of
+// #push_value, for embedding an already-serialized fragment (e.g. a cached
+// subtree). In an object the bytes are the whole `"key":value` member, unless a
+// key is already pending from #push_key, in which case they are just its value.
+// Unlike #append_raw (which splices bytes verbatim, ignoring the writer state),
+// this emits the owed comma and updates has_child/need_value so the surrounding
+// document stays well-formed.
+static VALUE builder_push_raw(VALUE self, VALUE raw) {
+    StringValue(raw);  // coerce via #to_str, or raise TypeError
+    builder_state *s = get_state(self);
+    if (!s->stack.empty()) {
+        frame &top = s->stack.back();
+        if (top.kind == frame_kind::OBJECT && top.need_value) {
+            top.need_value = false;  // fills the slot opened by #push_key
+        } else {
+            if (top.has_child) {
+                s->b->append_comma();
+            }
+            top.has_child = true;
+        }
+    }
+    s->b->append_raw(std::string_view(RSTRING_PTR(raw), RSTRING_LEN(raw)));
+    builder_maybe_flush(s);
+    return self;
+}
+
 // Force any buffered bytes out to the streaming io now (a no-op when not
 // streaming). Used at capture boundaries and to finish a document.
 static VALUE builder_flush(VALUE self) {
@@ -572,6 +599,7 @@ void Init_simdjson(void) {
     rb_define_method(rb_cSimdjsonBuilder, "push_array", builder_push_array, -1);
     rb_define_method(rb_cSimdjsonBuilder, "push_value", builder_push_value, -1);
     rb_define_method(rb_cSimdjsonBuilder, "push_key", builder_push_key, 1);
+    rb_define_method(rb_cSimdjsonBuilder, "push_raw", builder_push_raw, 1);
     rb_define_method(rb_cSimdjsonBuilder, "pop", builder_pop, 0);
     rb_define_method(rb_cSimdjsonBuilder, "pop_all", builder_pop_all, 0);
     rb_define_method(rb_cSimdjsonBuilder, "flush", builder_flush, 0);
