@@ -205,6 +205,11 @@ class BuilderTest < Minitest::Test
     assert_raises(Simdjson::BuilderError) { @b.push_value(1) }
   end
 
+  def test_second_object_member_still_requires_a_key
+    @b.push_object.push_value(1, 'a')
+    assert_raises(Simdjson::BuilderError) { @b.push_value(2) }
+  end
+
   def test_array_element_rejects_a_key
     @b.push_array
     assert_raises(Simdjson::BuilderError) { @b.push_value(1, 'a') }
