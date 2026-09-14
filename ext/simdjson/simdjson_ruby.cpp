@@ -196,6 +196,11 @@ static inline void builder_maybe_flush(builder_state *s) {
     }
 }
 
+// One OS page. Comfortably holds a typical small/medium JSON payload in a single
+// allocation, and matches DEFAULT_BUFFER_SIZE so a streaming builder does not
+// reallocate before its first flush. (simdjson's own default is 1 KiB.)
+static const size_t DEFAULT_INITIAL_CAPACITY = 4096;
+
 static const size_t DEFAULT_BUFFER_SIZE = 4096;
 
 // Simdjson::Builder.new(capacity = nil, io: nil, buffer_size: 4096)
@@ -203,7 +208,7 @@ static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
     VALUE capacity, opts;
     rb_scan_args(argc, argv, "01:", &capacity, &opts);
 
-    size_t initial = simd_builder::DEFAULT_INITIAL_CAPACITY;
+    size_t initial = DEFAULT_INITIAL_CAPACITY;
     if (!NIL_P(capacity)) {
         if (!RB_INTEGER_TYPE_P(capacity)) {
             rb_raise(rb_eTypeError, "capacity must be an Integer");
