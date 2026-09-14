@@ -115,7 +115,7 @@ struct frame {
 struct builder_state {
     simd_builder *b;
     VALUE io;            // the sink, or Qnil for buffer-only
-    size_t buffer_size;  // flush threshold when streaming
+    size_t buffer_size;  // internal buffer size: initial allocation, and flush threshold when streaming
     std::vector<frame> stack;
 };
 
@@ -197,42 +197,30 @@ static inline void builder_maybe_flush(builder_state *s) {
 }
 
 // One OS page. Comfortably holds a typical small/medium JSON payload in a single
-// allocation, and matches DEFAULT_BUFFER_SIZE so a streaming builder does not
-// reallocate before its first flush. (simdjson's own default is 1 KiB.)
-static const size_t DEFAULT_INITIAL_CAPACITY = 4096;
-
+// allocation. (simdjson's own default is 1 KiB.)
 static const size_t DEFAULT_BUFFER_SIZE = 4096;
 
-// Simdjson::Builder.new(capacity = nil, io: nil, buffer_size: 4096)
+// Simdjson::Builder.new(io = nil, buffer_size: 4096)
+//
+// buffer_size is the size of the internal buffer: the initial allocation always,
+// and (when io is given) the threshold at which the buffer is flushed to io and
+// reset. One knob, since for a streaming builder the ideal initial capacity is
+// exactly the flush threshold.
 static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
-    VALUE capacity, opts;
-    rb_scan_args(argc, argv, "01:", &capacity, &opts);
+    VALUE io, opts;
+    rb_scan_args(argc, argv, "01:", &io, &opts);
 
-    size_t initial = DEFAULT_INITIAL_CAPACITY;
-    if (!NIL_P(capacity)) {
-        if (!RB_INTEGER_TYPE_P(capacity)) {
-            rb_raise(rb_eTypeError, "capacity must be an Integer");
-        }
-        // A negative capacity would wrap to a huge size_t under NUM2SIZET; reject
-        // it up front rather than letting the allocation fail lazily at #buffer.
-        if (RTEST(rb_funcall(capacity, rb_intern("negative?"), 0))) {
-            rb_raise(rb_eArgError, "capacity must be non-negative");
-        }
-        initial = NUM2SIZET(capacity);
+    if (!NIL_P(io) && !rb_respond_to(io, id_write)) {
+        rb_raise(rb_eTypeError, "io must respond to #write");
     }
 
-    VALUE io = Qnil;
     size_t buffer_size = DEFAULT_BUFFER_SIZE;
     if (!NIL_P(opts)) {
-        VALUE v_io = rb_hash_aref(opts, ID2SYM(rb_intern("io")));
-        if (!NIL_P(v_io)) {
-            if (!rb_respond_to(v_io, id_write)) {
-                rb_raise(rb_eTypeError, "io must respond to #write");
-            }
-            io = v_io;
-        }
-        VALUE v_bs = rb_hash_aref(opts, ID2SYM(rb_intern("buffer_size")));
-        if (!NIL_P(v_bs)) {
+        const ID keywords[] = {rb_intern("buffer_size")};
+        VALUE values[1];
+        rb_get_kwargs(opts, keywords, 0, 1, values);  // rejects unknown keywords
+        VALUE v_bs = values[0];
+        if (v_bs != Qundef && !NIL_P(v_bs)) {
             if (!RB_INTEGER_TYPE_P(v_bs) ||
                 RTEST(rb_funcall(v_bs, rb_intern("<="), 1, INT2FIX(0)))) {
                 rb_raise(rb_eArgError, "buffer_size must be a positive Integer");
@@ -244,7 +232,7 @@ static VALUE builder_initialize(int argc, VALUE *argv, VALUE self) {
     // Guard against a second #initialize leaking the state from the first. On
     // the normal path the wrapped pointer is NULL (see builder_allocate).
     builder_free(RTYPEDDATA_DATA(self));
-    auto s = new builder_state{new simd_builder(initial), io, buffer_size};
+    auto s = new builder_state{new simd_builder(buffer_size), io, buffer_size};
     RTYPEDDATA_DATA(self) = s;
     return self;
 }

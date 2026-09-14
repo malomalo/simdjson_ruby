@@ -258,23 +258,15 @@ class BuilderTest < Minitest::Test
     assert_equal @b.buffer, @b.to_s
   end
 
-  def test_initial_capacity_argument
-    b = Simdjson::Builder.new(8)
+  def test_buffer_grows_past_its_initial_size
+    b = Simdjson::Builder.new(buffer_size: 8)
     b.append('a longer string than eight bytes')
     assert_equal '"a longer string than eight bytes"', b.buffer
   end
 
-  def test_negative_capacity_raises
-    assert_raises(ArgumentError) { Simdjson::Builder.new(-1) }
-  end
-
-  def test_non_integer_capacity_raises
-    assert_raises(TypeError) { Simdjson::Builder.new('big') }
-  end
-
   def test_reinitialize_resets_and_does_not_double_free
     @b.append('discarded')
-    @b.send(:initialize, 8)
+    @b.send(:initialize)
     assert_equal 0, @b.size
     assert_equal '', @b.buffer # the old contents are gone, not carried over
     assert_equal '"x"', @b.append('x').buffer
@@ -285,7 +277,7 @@ class BuilderTest < Minitest::Test
 
   def test_streams_to_io_as_the_buffer_fills
     io = StringIO.new
-    b = Simdjson::Builder.new(io: io, buffer_size: 16)
+    b = Simdjson::Builder.new(io, buffer_size: 16)
     b.push_array
     10.times { |i| b.push_value("element-#{i}") }
     # Past the 16-byte buffer, content has already been handed to the io before
@@ -298,7 +290,7 @@ class BuilderTest < Minitest::Test
 
   def test_flush_writes_the_remaining_bytes
     io = StringIO.new
-    b = Simdjson::Builder.new(io: io, buffer_size: 1 << 20) # large: nothing auto-flushes
+    b = Simdjson::Builder.new(io, buffer_size: 1 << 20) # large: nothing auto-flushes
     b.push_object.push_value(1, 'a').pop
     assert_empty io.string, 'nothing should be written until the buffer fills or #flush'
     b.flush
@@ -307,7 +299,7 @@ class BuilderTest < Minitest::Test
 
   def test_buffer_holds_only_the_unflushed_tail_when_streaming
     io = StringIO.new
-    b = Simdjson::Builder.new(io: io, buffer_size: 8)
+    b = Simdjson::Builder.new(io, buffer_size: 8)
     b.append_raw('xxxxxxxxxx') # 10 bytes > 8 -> flushed to io, buffer reset
     assert_equal 'xxxxxxxxxx', io.string
     assert_equal '', b.buffer
@@ -315,7 +307,7 @@ class BuilderTest < Minitest::Test
 
   def test_structure_survives_a_mid_document_flush
     io = StringIO.new
-    b = Simdjson::Builder.new(io: io, buffer_size: 8)
+    b = Simdjson::Builder.new(io, buffer_size: 8)
     b.push_object
     b.push_value('a-fairly-long-value', 'key') # forces a flush mid-object
     b.push_value(2, 'b')
@@ -330,20 +322,25 @@ class BuilderTest < Minitest::Test
     assert_equal '1', @b.buffer
   end
 
-  def test_accepts_capacity_and_io_together
+  def test_accepts_io_positionally_with_buffer_size
     io = StringIO.new
-    b = Simdjson::Builder.new(1024, io: io, buffer_size: 4096)
+    b = Simdjson::Builder.new(io, buffer_size: 4096)
     b.append(1)
     b.flush
     assert_equal '1', io.string
   end
 
   def test_io_must_respond_to_write
-    assert_raises(TypeError) { Simdjson::Builder.new(io: Object.new) }
+    assert_raises(TypeError) { Simdjson::Builder.new(Object.new) }
   end
 
   def test_buffer_size_must_be_a_positive_integer
-    assert_raises(ArgumentError) { Simdjson::Builder.new(io: StringIO.new, buffer_size: 0) }
-    assert_raises(ArgumentError) { Simdjson::Builder.new(io: StringIO.new, buffer_size: -1) }
+    assert_raises(ArgumentError) { Simdjson::Builder.new(buffer_size: 0) }
+    assert_raises(ArgumentError) { Simdjson::Builder.new(buffer_size: -1) }
+    assert_raises(ArgumentError) { Simdjson::Builder.new(buffer_size: 'big') }
+  end
+
+  def test_unknown_keyword_raises
+    assert_raises(ArgumentError) { Simdjson::Builder.new(foo: 1) }
   end
 end
