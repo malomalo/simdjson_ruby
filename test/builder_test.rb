@@ -276,6 +276,7 @@ class BuilderTest < Minitest::Test
     @b.append('discarded')
     @b.send(:initialize, 8)
     assert_equal 0, @b.size
+    assert_equal '', @b.buffer # the old contents are gone, not carried over
     assert_equal '"x"', @b.append('x').buffer
     GC.start
   end
